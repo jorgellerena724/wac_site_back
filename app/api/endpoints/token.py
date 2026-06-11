@@ -1,0 +1,335 @@
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Generator, List
+from fastapi import APIRouter, Depends, HTTPException, Form, status
+from fastapi.logger import logger
+from fastapi.security import OAuth2PasswordBearer
+from jose import jwt, JWTError
+from passlib.context import CryptContext
+from sqlmodel import Session, select, text
+from app.models.wep_user_model import WepUserModel
+from app.config.database import get_db, engine
+from app.config.config import settings
+import logging, json, os
+
+router = APIRouter()
+
+# Configurar logging para debug
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Configuración de seguridad
+bcrypt_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+ALGORITHM = "HS256"
+is_sqlite = settings.USE_SQLITE
+
+# Lista de tokens de frontend permitidos (formato JSON como ALLOWED_HOSTS)
+def parse_token_list(env_value: str) -> List[str]:
+    """
+    Parsea la lista de tokens desde el .env
+    Soporta tanto formato JSON como string separado por comas (legacy)
+    """  
+    if not env_value:
+        return []
+    
+    env_value = env_value.strip()
+    
+    # Intentar parsear como JSON primero
+    if env_value.startswith('[') and env_value.endswith(']'):
+        try:
+            tokens = json.loads(env_value)
+            return tokens
+        except json.JSONDecodeError as e:
+            return []
+    
+    # Fallback: parsear como string separado por comas
+    tokens = [token.strip() for token in env_value.split(",") if token.strip()]
+    return tokens
+
+# Parsear tokens
+FRONT_TOKENS = parse_token_list(os.getenv("FRONT_TOKENS", ""))
+
+class MockUser:
+    """Clase para crear usuarios mock desde tokens de frontend"""
+    def __init__(self, client: str, email: str = None, full_name: str = None, user_id: str = None, source: str = None):
+        self.client = client
+        self.email = email or f"frontend@{client}.com"
+        self.full_name = full_name or f"Frontend User - {client}"
+        self.id = user_id or "frontend"
+        self.source = source or "unknown"  # Valor por defecto
+        self.password = "frontend"
+        
+        # Log para debug
+        logger.info(f"🔧 MockUser creado - client: {self.client}, source: {self.source}, email: {self.email}")
+
+def decode_frontend_token(token: str) -> Dict[str, Any]:
+    """
+    Intenta decodificar un token de frontend usando la SECRET_KEY
+    Retorna el payload si es válido, None si no se puede decodificar
+    Los tokens de frontend no tienen expiración, por lo que deshabilitamos verify_exp
+    """
+    
+    try:
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=[ALGORITHM],
+            options={"verify_exp": False}  # Deshabilitar verificación de expiración
+        )
+        logger.info(f"🔓 Token decodificado exitosamente: {payload}")
+        return payload
+    except JWTError as e:
+        logger.warning(f"⚠️ Error decodificando token: {e}")
+        return None
+
+def create_mock_user_from_token(token: str) -> MockUser:
+    """
+    Crea un MockUser a partir de un token de frontend decodificado
+    """
+    
+    payload = decode_frontend_token(token)
+    
+    if payload:
+        
+        # Extraer información del payload
+        client = payload.get("client", "default")
+        email = payload.get("email", f"frontend@{client}.com")
+        full_name = payload.get("full_name", f"Frontend User - {client}")
+        user_id = payload.get("id", "frontend")
+        source = payload.get("source", "website")
+        
+        logger.info(f"📝 Creando MockUser con datos del payload:")
+        logger.info(f"   - client: {client}")
+        logger.info(f"   - email: {email}")
+        logger.info(f"   - source: {source}")
+        logger.info(f"   - user_id: {user_id}")
+              
+        mock_user = MockUser(
+            client=client,
+            email=email,
+            full_name=full_name,
+            user_id=str(user_id),
+            source=source
+        )
+        
+        return mock_user
+    else:
+        # Si no se puede decodificar, crear usuario por defecto
+        logger.warning("⚠️ No se pudo decodificar el token, creando usuario por defecto")
+        mock_user = MockUser(client="shirkasoft", email="shirkasoft", full_name="shirkasoft")
+        return mock_user
+
+# Función auxiliar para crear usuario extendido desde payload JWT
+class ExtendedUser:
+    """Clase para usuarios reales con campos adicionales del JWT"""
+    def __init__(self, user: WepUserModel, source: str = None):
+        # Copiar todos los atributos del usuario original
+        for attr in dir(user):
+            if not attr.startswith('_'):
+                setattr(self, attr, getattr(user, attr))
+        
+        # Agregar el campo source
+        self.source = source or "dashboard"
+        
+        logger.info(f"👤 ExtendedUser creado - email: {self.email}, source: {self.source}, client: {self.client}")
+
+# ----------------------------
+# Función para generar token (login)
+# ----------------------------
+
+@router.post("/sign-in/")
+async def login(
+    email: str = Form(...),
+    password: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    
+    # 1. Verificar si el usuario existe
+    user = db.exec(
+        select(WepUserModel).where(WepUserModel.email == email)
+    ).first()
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="Email no registrado")
+
+    # 2. Verificar contraseña con bcrypt 
+    if not bcrypt_context.verify(password, user.password):
+        raise HTTPException(status_code=401, detail="Contraseña incorrecta")
+
+    # 3. Generar token JWT firmado con HS256
+    access_token = jwt.encode(
+        {
+            "id": str(user.id),
+            "full_name": user.full_name,
+            "email": user.email, 
+            "client": user.client, 
+            "source": "dashboard",  # Agregar source para usuarios del dashboard
+            "exp": datetime.now(timezone.utc) + timedelta(minutes=60)
+        },
+        settings.SECRET_KEY,  
+        algorithm=ALGORITHM
+    )
+
+    return {"access_token": access_token, "token_type": "bearer"}
+
+# ----------------------------
+# Función para decodificar/validar token
+# ----------------------------
+
+async def verify_token(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    logger.info("🔐 verify_token: INICIO")
+    
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Token inválido o expirado",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    # Intentamos decodificar cualquier token JWT primero
+    try:
+        # Decodificar sin verificar expiración para analizar el contenido
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=[ALGORITHM],
+            options={"verify_exp": False}
+        )
+        
+        # Obtener el source del payload
+        source = payload.get("source", "dashboard")
+        email = payload.get("email")
+        
+        # CASE 1: Token de WEBSITE (no verificar expiración, crear MockUser)
+        if source == "website":
+            
+            # Para tokens de website, crear MockUser directamente del payload
+            client = payload.get("client", "default")
+            full_name = payload.get("full_name", f"Website User - {client}")
+            user_id = payload.get("id", "website")
+            
+            mock_user = MockUser(
+                client=client,
+                email=email or f"website@{client}.com",
+                full_name=full_name,
+                user_id=str(user_id),
+                source=source
+            )
+            
+            logger.info(f"✅ MockUser creado para website - client: {mock_user.client}, source: {mock_user.source}")
+            return mock_user
+        
+        # CASE 2: Token de DASHBOARD (verificar expiración y usuario en BD)
+        else:
+            # Para tokens de dashboard, verificar expiración
+            try:
+                payload = jwt.decode(
+                    token,
+                    settings.SECRET_KEY,
+                    algorithms=[ALGORITHM]
+                    # verify_exp=True por defecto
+                )
+                logger.info("✅ Token de dashboard válido")
+            except JWTError as e:
+                logger.warning(f"⚠️ Token de dashboard expirado: {e}")
+                raise credentials_exception
+            
+            if email is None:
+                logger.warning("⚠️ Token de dashboard sin email")
+                raise credentials_exception
+
+            # Verificar si el usuario existe en la BD
+            user = db.exec(
+                select(WepUserModel).where(WepUserModel.email == email)
+            ).first()
+            
+            if user is None:
+                logger.warning(f"⚠️ Usuario de dashboard no encontrado: {email}")
+                raise credentials_exception
+
+            # Crear ExtendedUser con el campo source del JWT
+            extended_user = ExtendedUser(user, source)
+            logger.info(f"✅ ExtendedUser creado para dashboard - email: {extended_user.email}, source: {extended_user.source}")
+            return extended_user
+        
+    except JWTError as e:
+        logger.warning(f"⚠️ No es un JWT válido: {e}")
+        
+        # FALLBACK: Verificar si está en FRONT_TOKENS (sistema legacy)
+        if token in FRONT_TOKENS:
+            logger.info("📋 Token encontrado en FRONT_TOKENS (legacy)")
+            mock_user = create_mock_user_from_token(token)
+            return mock_user
+        
+        logger.error("❌ Token completamente inválido")
+        raise credentials_exception
+
+async def get_current_tenant(current_user = Depends(verify_token)) -> str:
+    tenant = current_user.client
+    logger.info(f"🏢 Tenant actual: {tenant}")
+    return tenant
+
+def get_tenant_session(client_name: str = Depends(get_current_tenant)) -> Generator[Session, None, None]:
+    """
+    Dependencia que proporciona una sesión de base de datos según el tipo de BD:
+    
+    - SQLite: Sesión simple sin multitenant (todas las tablas compartidas)
+    - PostgreSQL: Sesión con search_path configurado al esquema del tenant
+    """
+    
+    if not client_name or not client_name.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Nombre de cliente inválido"
+        )
+    
+    with Session(engine) as session:
+        try:
+            # ====== SQLITE: SIN MULTITENANT ======
+            if is_sqlite:
+                logger.info(f"✅ SQLite: Sesión simple (sin multitenant) para '{client_name}'")
+                # Simplemente retornar la sesión sin hacer nada más
+                yield session
+                # No hay finally, no hay search_path, nada
+                return
+            
+            # ====== POSTGRESQL: CON MULTITENANT ======
+            logger.info(f"🔌 PostgreSQL: Conectando a esquema '{client_name}'")
+            
+            # Configurar search_path al esquema del tenant
+            session.exec(text(f"SET search_path TO {client_name}, public"))
+            
+            # Verificar que el esquema existe
+            schema_check = session.exec(text("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.schemata 
+                    WHERE schema_name = :schema_name
+                )
+            """).bindparams(schema_name=client_name)).scalar()
+            
+            if not schema_check:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Esquema '{client_name}' no encontrado"
+                )
+            
+            logger.info(f"✅ PostgreSQL: Conectado a esquema '{client_name}'")
+            yield session
+            
+        except HTTPException:
+            raise
+            
+        except Exception as e:
+            logger.error(f"❌ Error de base de datos para cliente '{client_name}': {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error de base de datos: {str(e)}"
+            )
+            
+        finally:
+            # Solo restaurar search_path en PostgreSQL
+            if not is_sqlite:
+                try:
+                    session.exec(text("SET search_path TO public"))
+                    logger.debug("✅ Search path restaurado a 'public'")
+                except Exception as e:
+                    logger.warning(f"⚠️ Error al restaurar search_path")

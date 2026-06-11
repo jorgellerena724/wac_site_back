@@ -1,0 +1,8 @@
+__pycache__/
+
+venv/
+.env
+shirkasoft.json
+
+wep_database.db
+
