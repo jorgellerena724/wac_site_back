@@ -14,9 +14,9 @@ class CategoryRead(SQLModel):
 
 class ProductRead(SQLModel):
     id: int
-    title: str
-    description: str
-    category: CategoryRead
+    title: Optional[str]
+    description: Optional[str]
+    category: Optional[CategoryRead]
     status: bool
     cal_url: Optional[str]
     variants: List[Dict]
@@ -26,13 +26,13 @@ router = APIRouter()
 
 @router.post("/", response_model=WepProductModel)
 async def create_product(
-    title: str = Form(..., max_length=100),
-    description: str = Form(...),
-    category_id: int = Form(...),
-    cal_url: str = Form(""),  # Cambiar a string vacío por defecto
-    files: List[UploadFile] = File(...),  # Múltiples archivos
-    file_titles: str = Form(...),  # JSON con títulos para cada archivo
-    variants: str = Form(None),
+    title: Optional[str] = Form(None, max_length=100),
+    description: Optional[str] = Form(None),
+    category_id: Optional[int] = Form(None),
+    cal_url: str = Form(""),
+    files: List[UploadFile] = File(...),
+    file_titles: Optional[str] = Form(None),
+    variants: Optional[str] = Form(None),
     current_user: WepUserModel = Depends(verify_token),
     db: Session = Depends(get_tenant_session)
 ):
@@ -54,17 +54,20 @@ async def create_product(
             except Exception as e:
                 raise HTTPException(status_code=400, detail=str(e))
         
-        # Procesar títulos de archivos
-        try:
-            titles_data = json.loads(file_titles)
-            if not isinstance(titles_data, list):
-                raise ValueError("file_titles debe ser una lista")
-            if len(titles_data) != len(files):
-                raise ValueError("La cantidad de títulos debe coincidir con la cantidad de archivos")
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=400, detail="JSON inválido en file_titles")
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        # Procesar títulos de archivos (auto-generar si no se envía)
+        if file_titles:
+            try:
+                titles_data = json.loads(file_titles)
+                if not isinstance(titles_data, list):
+                    raise ValueError("file_titles debe ser una lista")
+                if len(titles_data) != len(files):
+                    raise ValueError("La cantidad de títulos debe coincidir con la cantidad de archivos")
+            except json.JSONDecodeError:
+                raise HTTPException(status_code=400, detail="JSON inválido en file_titles")
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=str(e))
+        else:
+            titles_data = [file.filename or f"Image {i+1}" for i, file in enumerate(files)]
         
         # Validar y guardar archivos
         saved_files = []

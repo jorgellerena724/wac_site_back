@@ -18,9 +18,9 @@ class WepProductModel(SQLModel, table=True):
     __tablename__ = "product"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    title: str        = Field(max_length=100, nullable=False)
-    description : str = Field(sa_type=Text(), nullable=False)
-    category_id: int = Field(foreign_key="category.id", nullable=False)
+    title: Optional[str] = Field(default=None, max_length=100, nullable=True)
+    description: Optional[str] = Field(default=None, sa_type=Text(), nullable=True)
+    category_id: Optional[int] = Field(default=None, foreign_key="category.id", nullable=True)
     status: bool      = Field(nullable=False, default=True)
     cal_url: str = Field(max_length=255, nullable=True)
     

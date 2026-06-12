@@ -379,6 +379,93 @@ def migrate_news_fecha_column():
         # Si la tabla no existe o ya está migrada, no es un error crítico
         logger.warning(f"⚠️ No se pudo migrar columna fecha (puede que ya esté migrada): {e}")
 
+def migrate_product_nullable_columns():
+    """Migra columnas de la tabla product para permitir NULL (title, description, category_id)"""
+    try:
+        with Session(engine) as session:
+            if is_sqlite:
+                table_exists_result = session.exec(text("""
+                    SELECT COUNT(*) FROM sqlite_master 
+                    WHERE type='table' AND name='product'
+                """))
+                if table_exists_result.scalar() == 0:
+                    logger.info("⏭️ Tabla product no existe aún, se creará con la estructura correcta")
+                    return
+                
+                result = session.exec(text("""
+                    SELECT sql FROM sqlite_master 
+                    WHERE type='table' AND name='product'
+                """))
+                table_sql = result.scalar()
+                
+                if table_sql:
+                    needs_migration = (
+                        'title VARCHAR(100) NOT NULL' in table_sql or
+                        'description TEXT NOT NULL' in table_sql or
+                        'category_id INTEGER NOT NULL' in table_sql
+                    )
+                    
+                    if needs_migration:
+                        logger.info("🔧 Migrando columnas de tabla product (SQLite)...")
+                        
+                        session.exec(text("""
+                            CREATE TABLE product_new (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                title VARCHAR(100),
+                                description TEXT,
+                                category_id INTEGER REFERENCES category(id),
+                                status BOOLEAN NOT NULL DEFAULT 1,
+                                cal_url VARCHAR(255),
+                                variants JSON DEFAULT '[]',
+                                files JSON DEFAULT '[]'
+                            )
+                        """))
+                        
+                        session.exec(text("""
+                            INSERT INTO product_new (id, title, description, category_id, status, cal_url, variants, files)
+                            SELECT id, title, description, category_id, status, cal_url, variants, files
+                            FROM product
+                        """))
+                        
+                        session.exec(text("DROP TABLE product"))
+                        session.exec(text("ALTER TABLE product_new RENAME TO product"))
+                        session.commit()
+                        logger.info("✅ Migración de columnas de product completada (SQLite)")
+                    else:
+                        logger.info("⏭️ Columnas de product ya permiten NULL (SQLite)")
+            else:
+                table_exists = session.exec(text("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_schema = 'public' 
+                        AND table_name = 'product'
+                    )
+                """))
+                
+                if not table_exists.scalar():
+                    logger.info("⏭️ Tabla product no existe aún, se creará con la estructura correcta")
+                    return
+                
+                for column in ['title', 'description', 'category_id']:
+                    result = session.exec(text(f"""
+                        SELECT is_nullable 
+                        FROM information_schema.columns 
+                        WHERE table_schema = 'public' 
+                        AND table_name = 'product' 
+                        AND column_name = '{column}'
+                    """))
+                    is_nullable = result.scalar()
+                    
+                    if is_nullable == 'NO':
+                        logger.info(f"🔧 Migrando columna {column} en tabla product (PostgreSQL)...")
+                        session.exec(text(f"ALTER TABLE public.product ALTER COLUMN {column} DROP NOT NULL"))
+                        session.commit()
+                        logger.info(f"✅ Columna {column} migrada correctamente")
+                    else:
+                        logger.info(f"⏭️ Columna {column} ya permite NULL (PostgreSQL)")
+    except Exception as e:
+        logger.warning(f"⚠️ No se pudo migrar columnas de product (puede que ya estén migradas): {e}")
+
 def init_database():
     """Inicializa la base de datos - función principal"""
     
@@ -388,6 +475,7 @@ def init_database():
     try:
         create_sqlmodel_tables()          # 1. Crear tablas base
         migrate_news_fecha_column()       # 1.5. Migrar columna fecha si es necesario
+        migrate_product_nullable_columns() # 1.6. Migrar columnas de product si es necesario
         create_admin_user()               # 2. Crear admin
         create_public_initial_data()      # 3. Crear datos iniciales
         verify_admin_user()               # 4. Verificar admin
