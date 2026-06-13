@@ -66,21 +66,34 @@ PARSERS = {
 @router.post("/", response_model=WepReviewsModel)
 async def create_reviews(
     title: str = Form(..., max_length=100),
-    description: str = Form(...),
-    photo: UploadFile = Form(...),
+    description: str = Form(..., max_length=500),
+    photo: Optional[UploadFile] = Form(None),
     star_rating: Optional[float] = Form(None),
     current_user: WepUserModel = Depends(verify_token),
     db: Session = Depends(get_tenant_session)
 ):
-    # Validar imagen
-    FileService.validate_file(photo)
+    # Sanitizar description (eliminar HTML)
+    source = getattr(current_user, 'source', 'unknown')
+    if source == "website":
+        import re
+        description = re.sub(r'<[^>]*>', '', description).strip()
+        if not description:
+            raise HTTPException(status_code=400, detail="La descripción no puede estar vacía")
     
     try:
-        # Guardar imagen (solo nombre)
-        photo_filename = await FileService.save_file(photo, current_user.client)
+        # Guardar imagen solo si se proporcionó
+        photo_filename = None
+        if photo is not None:
+            FileService.validate_file(photo)
+            photo_filename = await FileService.save_file(photo, current_user.client)
         
         # Crear registro
-        reviews = WepReviewsModel(title=title, description=description, photo=photo_filename, star_rating=star_rating)
+        reviews = WepReviewsModel(
+            title=title,
+            description=description,
+            photo=photo_filename,
+            star_rating=star_rating
+        )
         db.add(reviews)
         db.commit()
         db.merge(reviews)
