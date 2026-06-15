@@ -168,7 +168,7 @@ def create_admin_user():
             
             if count == 0:
                 # Hashear la contraseña
-                plain_password = "maXS@sdasd1234"
+                plain_password = settings.ADMIN_PASSWORD
                 hashed_password = bcrypt_context.hash(plain_password)
                 
                 # Crear el usuario admin con client = 'shirkasoft'

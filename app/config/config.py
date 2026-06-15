@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     UPLOADS: str = Field(default="uploads", env="UPLOADS")
     USE_SQLITE: bool = Field(False, env="USE_SQLITE")
     SQLITE_DB_PATH: str = Field("wep_database.db", env="SQLITE_DB_PATH")
+    ADMIN_PASSWORD: str = Field("", env="ADMIN_PASSWORD")
     
     # ============================================
     # CONFIGURACIÓN DE EMAIL (SMTP)
