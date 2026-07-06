@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     RECEIVER_EMAIL: Optional[str] = Field(None, env="RECEIVER_EMAIL")
     FROM_NAME: Optional[str] = Field(None, env="FROM_NAME")
     
+    # ============================================
+    # WAC BACKEND PROXY CONFIGURATION
+    # ============================================
+    WAC_BACKEND_URL: str = Field(default="http://localhost:8000", env="WAC_BACKEND_URL")
+    
     
     # ============================================
     # VALIDACIONES

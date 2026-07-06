@@ -20,6 +20,8 @@ from .endpoints import publications
 from .endpoints import publication_category
 from .endpoints import manager_category
 from .endpoints import backup
+from .endpoints import wac_proxy
+from .endpoints import wac_portal
 
 # Crear el router principal para la API v1
 api_router = APIRouter()
@@ -45,3 +47,5 @@ api_router.include_router(publication_category.router, prefix="/publication-cate
 api_router.include_router(publications.router, prefix="/publications", tags=["Publicaciones"])
 api_router.include_router(emails.router, prefix="/emails", tags=["emails"])
 api_router.include_router(backup.router, prefix="", tags=["Backup"])
+api_router.include_router(wac_proxy.router, prefix="/wac", tags=["WAC Proxy"])
+api_router.include_router(wac_portal.router, prefix="/portal", tags=["WAC Portal"])
